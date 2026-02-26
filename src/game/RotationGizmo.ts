@@ -32,17 +32,17 @@ export class RotationGizmo extends THREE.Group {
         ];
 
         for (const { axis, color, rotation } of axes) {
-            const geo = new THREE.TorusGeometry(1.2, RING_TUBE, 12, RING_SEGMENTS);
+            const geo = new THREE.TorusGeometry(2, RING_TUBE, 12, RING_SEGMENTS);
             const mat = new THREE.MeshBasicMaterial({
                 color,
                 transparent: true,
                 opacity: 0.7,
-                depthTest: false,
+                depthTest: true,
             });
             const mesh = new THREE.Mesh(geo, mat);
             mesh.rotation.copy(rotation);
             mesh.userData.gizmoAxis = axis;
-            mesh.renderOrder = 999;
+            mesh.renderOrder = 0;
             this.add(mesh);
             this.rings.push({ axis, mesh });
         }
@@ -66,8 +66,11 @@ export class RotationGizmo extends THREE.Group {
         if (this.hoveredRing === mesh) return;
         this.resetHover();
         if (mesh) {
-            (mesh.material as THREE.MeshBasicMaterial).opacity = 1.0;
-            (mesh.material as THREE.MeshBasicMaterial).color.setHex(GIZMO_COLORS.hover);
+            const mat = mesh.material as THREE.MeshBasicMaterial;
+            mat.opacity = 1.0;
+            mat.color.setHex(GIZMO_COLORS.hover);
+            mat.depthTest = false;
+            mesh.renderOrder = 999;
             this.hoveredRing = mesh;
         }
     }
@@ -76,10 +79,11 @@ export class RotationGizmo extends THREE.Group {
         if (this.hoveredRing) {
             const ring = this.rings.find(r => r.mesh === this.hoveredRing);
             if (ring) {
-                (ring.mesh.material as THREE.MeshBasicMaterial).opacity = 0.7;
-                (ring.mesh.material as THREE.MeshBasicMaterial).color.setHex(
-                    GIZMO_COLORS[ring.axis]
-                );
+                const mat = ring.mesh.material as THREE.MeshBasicMaterial;
+                mat.opacity = 0.7;
+                mat.color.setHex(GIZMO_COLORS[ring.axis]);
+                mat.depthTest = true;
+                ring.mesh.renderOrder = 0;
             }
             this.hoveredRing = null;
         }
