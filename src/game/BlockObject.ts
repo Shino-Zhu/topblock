@@ -168,7 +168,6 @@ export class BlockObject extends THREE.Group {
             if (this.selected) {
                 this.setSelected(true);
             }
-            this.adjustToFloor();
         }
     }
 
@@ -188,7 +187,7 @@ export class BlockObject extends THREE.Group {
     }
 
     /**
-     * Get the center of the block in world coordinates
+     * Get the geometric center of the block in world coordinates
      */
     getWorldCenter(): THREE.Vector3 {
         const center = new THREE.Vector3();
@@ -198,5 +197,15 @@ export class BlockObject extends THREE.Group {
         center.divideScalar(this.cells.length);
         center.add(this.position);
         return center;
+    }
+
+    /**
+     * Get the world position of the center cell (cells[0], always [0,0,0] initially).
+     * This is used for gizmo positioning — it stays stable after rotation
+     * since the rotation pivot is at this cell.
+     */
+    getCenterCellWorldPos(): THREE.Vector3 {
+        const cell = this.cells[0];
+        return new THREE.Vector3(cell[0], cell[1] + 0.5, cell[2]).add(this.position);
     }
 }

@@ -56,7 +56,7 @@ export class InteractionManager {
         }
         // Update gizmo position if selected block exists
         if (this.selectedBlock && this.gizmo.visible && !this.isDragging && !this.isGizmoDragging) {
-            this.gizmo.position.copy(this.selectedBlock.getWorldCenter());
+            this.gizmo.position.copy(this.selectedBlock.getCenterCellWorldPos());
         }
     }
 
@@ -76,7 +76,7 @@ export class InteractionManager {
         this.selectedBlock = block;
         if (block) {
             block.setSelected(true);
-            this.gizmo.show(block.getWorldCenter());
+            this.gizmo.show(block.getCenterCellWorldPos());
         } else {
             this.gizmo.hide();
         }
@@ -286,8 +286,7 @@ export class InteractionManager {
             this.dragPlaneHelper.hide();
             if (this.selectedBlock) {
                 this.selectedBlock.snapToGrid();
-                this.selectedBlock.adjustToFloor();
-                this.gizmo.show(this.selectedBlock.getWorldCenter()); // show gizmo after drag
+                this.gizmo.show(this.selectedBlock.getCenterCellWorldPos()); // show gizmo after drag
             }
         } else if (dist < 5) {
             // Click on empty space - deselect
