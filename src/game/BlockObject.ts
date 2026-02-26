@@ -1,0 +1,198 @@
+import * as THREE from 'three';
+import { BlockDefinition } from './blocks';
+
+const EDGE_COLOR = 0x000000;
+const ROTATION_DURATION = 500; // ms
+
+export class BlockObject extends THREE.Group {
+    blockId: number;
+    cells: number[][];
+    baseColor: THREE.Color;
+    private cellMeshes: THREE.Mesh[] = [];
+    private edgeMeshes: THREE.LineSegments[] = [];
+    selected: boolean = false;
+
+    // Rotation animation state
+    private isAnimating = false;
+    private animStartTime = 0;
+    private animStartQuat = new THREE.Quaternion();
+    private animTargetQuat = new THREE.Quaternion();
+    private animPivotGroup: THREE.Group | null = null; // visual wrapper during animation
+    private pendingCells: number[][] | null = null; // cells after rotation completes
+
+    constructor(def: BlockDefinition) {
+        super();
+        this.blockId = def.id;
+        this.cells = def.cells.map(c => [...c]);
+        this.baseColor = def.color.clone();
+        this.buildMeshes();
+    }
+
+    private buildMeshes() {
+        // Clear old
+        this.cellMeshes.forEach(m => {
+            m.geometry.dispose();
+            (m.material as THREE.Material).dispose();
+        });
+        this.edgeMeshes.forEach(m => {
+            m.geometry.dispose();
+            (m.material as THREE.Material).dispose();
+        });
+        this.cellMeshes = [];
+        this.edgeMeshes = [];
+        this.clear();
+
+        const geo = new THREE.BoxGeometry(0.95, 0.95, 0.95);
+        const edgeGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(0.95, 0.95, 0.95));
+
+        for (const cell of this.cells) {
+            const mat = new THREE.MeshStandardMaterial({
+                color: this.baseColor,
+                roughness: 0.5,
+                metalness: 0.1,
+            });
+            const mesh = new THREE.Mesh(geo.clone(), mat);
+            mesh.position.set(cell[0], cell[1] + 0.5, cell[2]);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            mesh.userData.blockId = this.blockId;
+            this.add(mesh);
+            this.cellMeshes.push(mesh);
+
+            const edgeMat = new THREE.LineBasicMaterial({ color: EDGE_COLOR, linewidth: 1 });
+            const edge = new THREE.LineSegments(edgeGeo.clone(), edgeMat);
+            edge.position.copy(mesh.position);
+            this.add(edge);
+            this.edgeMeshes.push(edge);
+        }
+    }
+
+    setSelected(selected: boolean) {
+        this.selected = selected;
+        const emissive = selected ? 0x333333 : 0x000000;
+        for (const mesh of this.cellMeshes) {
+            (mesh.material as THREE.MeshStandardMaterial).emissive.setHex(emissive);
+        }
+    }
+
+    /**
+     * Get all cell meshes for raycasting
+     */
+    getCellMeshes(): THREE.Mesh[] {
+        return this.cellMeshes;
+    }
+
+    /**
+     * Snap position to integer grid
+     */
+    snapToGrid() {
+        this.position.x = Math.round(this.position.x);
+        this.position.y = Math.max(0, Math.round(this.position.y));
+        this.position.z = Math.round(this.position.z);
+    }
+
+    /**
+     * Whether block is currently animating
+     */
+    get animating() {
+        return this.isAnimating;
+    }
+
+    /**
+     * Rotate block 90 degrees around a given world axis — with animation
+     */
+    rotateBlock(axis: THREE.Vector3) {
+        if (this.isAnimating) return; // don't stack rotations
+
+        // Compute target cells after rotation
+        const quat = new THREE.Quaternion().setFromAxisAngle(axis.normalize(), Math.PI / 2);
+        this.pendingCells = this.cells.map(cell => {
+            const v = new THREE.Vector3(cell[0], cell[1], cell[2]);
+            v.applyQuaternion(quat);
+            return [Math.round(v.x), Math.round(v.y), Math.round(v.z)];
+        });
+
+        // Wrap all children in a pivot group for visual rotation
+        this.animPivotGroup = new THREE.Group();
+        const childrenCopy = [...this.children];
+        for (const child of childrenCopy) {
+            this.animPivotGroup.add(child);
+        }
+        this.add(this.animPivotGroup);
+
+        // Set up animation
+        this.animStartQuat.identity();
+        this.animTargetQuat.copy(quat);
+        this.animStartTime = performance.now();
+        this.isAnimating = true;
+    }
+
+    /**
+     * Called each frame to update animation
+     */
+    updateAnimation() {
+        if (!this.isAnimating || !this.animPivotGroup) return;
+
+        const elapsed = performance.now() - this.animStartTime;
+        const t = Math.min(elapsed / ROTATION_DURATION, 1);
+        const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+
+        const currentQuat = new THREE.Quaternion().slerpQuaternions(
+            this.animStartQuat, this.animTargetQuat, ease
+        );
+        this.animPivotGroup.quaternion.copy(currentQuat);
+
+        if (t >= 1) {
+            // Animation complete — apply the real rotation to cells
+            this.isAnimating = false;
+
+            // Remove pivot group, reparent children
+            const children = [...this.animPivotGroup.children];
+            for (const child of children) {
+                this.add(child);
+            }
+            this.remove(this.animPivotGroup);
+            this.animPivotGroup = null;
+
+            // Now apply the actual cell data
+            if (this.pendingCells) {
+                this.cells = this.pendingCells;
+                this.pendingCells = null;
+            }
+            // Rebuild with correct positions
+            this.buildMeshes();
+            if (this.selected) {
+                this.setSelected(true);
+            }
+            this.adjustToFloor();
+        }
+    }
+
+    /**
+     * Ensure all cells are above the floor (y >= 0)
+     */
+    adjustToFloor() {
+        let minY = Infinity;
+        for (const cell of this.cells) {
+            const worldY = this.position.y + cell[1];
+            if (worldY < minY) minY = worldY;
+        }
+        if (minY < 0) {
+            this.position.y -= minY;
+        }
+        this.snapToGrid();
+    }
+
+    /**
+     * Get the center of the block in world coordinates
+     */
+    getWorldCenter(): THREE.Vector3 {
+        const center = new THREE.Vector3();
+        for (const cell of this.cells) {
+            center.add(new THREE.Vector3(cell[0], cell[1] + 0.5, cell[2]));
+        }
+        center.divideScalar(this.cells.length);
+        center.add(this.position);
+        return center;
+    }
+}
