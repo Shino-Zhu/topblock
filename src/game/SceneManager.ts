@@ -19,6 +19,13 @@ export class SceneManager {
     private cameraAnimating = false;
     private cameraAnimStart = 0;
     private cameraAnimDuration = 500; // ms
+    private cameraAnimMode: 'rotate' | 'reset' = 'rotate';
+    // For angle-based rotation
+    private camAnimStartAngle = 0;
+    private camAnimDeltaAngle = 0;
+    private camAnimRadius = 0;
+    private camAnimHeight = 0;
+    // For reset (position lerp)
     private cameraStartPos = new THREE.Vector3();
     private cameraTargetPos = new THREE.Vector3();
 
@@ -112,7 +119,19 @@ export class SceneManager {
             const elapsed = now - this.cameraAnimStart;
             const t = Math.min(elapsed / this.cameraAnimDuration, 1);
             const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; // easeInOutQuad
-            this.camera.position.lerpVectors(this.cameraStartPos, this.cameraTargetPos, ease);
+
+            if (this.cameraAnimMode === 'rotate') {
+                // Angle-based interpolation to keep constant distance
+                const angle = this.camAnimStartAngle + this.camAnimDeltaAngle * ease;
+                this.camera.position.set(
+                    this.controls.target.x + this.camAnimRadius * Math.cos(angle),
+                    this.controls.target.y + this.camAnimHeight,
+                    this.controls.target.z + this.camAnimRadius * Math.sin(angle)
+                );
+            } else {
+                this.camera.position.lerpVectors(this.cameraStartPos, this.cameraTargetPos, ease);
+            }
+
             if (t >= 1) {
                 this.cameraAnimating = false;
             }
@@ -132,6 +151,7 @@ export class SceneManager {
     resetCamera() {
         this.cameraStartPos.copy(this.camera.position);
         this.cameraTargetPos.copy(INITIAL_CAMERA_POS);
+        this.cameraAnimMode = 'reset';
         this.cameraAnimStart = performance.now();
         this.cameraAnimating = true;
         this.controls.target.copy(LOOK_AT);
@@ -139,19 +159,12 @@ export class SceneManager {
 
     rotateCameraAroundY(angleDeg: number) {
         if (this.cameraAnimating) return; // don't stack animations
-        const angle = THREE.MathUtils.degToRad(angleDeg);
-        // Use current camera position (possibly mid-animation target)
-        const currentPos = this.cameraAnimating ? this.cameraTargetPos.clone() : this.camera.position.clone();
-        const offset = currentPos.sub(this.controls.target);
-        const cosA = Math.cos(angle);
-        const sinA = Math.sin(angle);
-        const newX = offset.x * cosA + offset.z * sinA;
-        const newZ = -offset.x * sinA + offset.z * cosA;
-        offset.x = newX;
-        offset.z = newZ;
-
-        this.cameraStartPos.copy(this.camera.position);
-        this.cameraTargetPos.copy(this.controls.target).add(offset);
+        const offset = this.camera.position.clone().sub(this.controls.target);
+        this.camAnimRadius = Math.sqrt(offset.x * offset.x + offset.z * offset.z);
+        this.camAnimHeight = offset.y;
+        this.camAnimStartAngle = Math.atan2(offset.z, offset.x);
+        this.camAnimDeltaAngle = THREE.MathUtils.degToRad(angleDeg);
+        this.cameraAnimMode = 'rotate';
         this.cameraAnimStart = performance.now();
         this.cameraAnimating = true;
     }

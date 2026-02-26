@@ -113,9 +113,13 @@ export class BlockObject extends THREE.Group {
         });
 
         // Wrap all children in a pivot group for visual rotation
+        // Pivot at (0, 0.5, 0) so visual rotation axis matches cell-space origin
+        const pivot = new THREE.Vector3(0, 0.5, 0);
         this.animPivotGroup = new THREE.Group();
+        this.animPivotGroup.position.copy(pivot);
         const childrenCopy = [...this.children];
         for (const child of childrenCopy) {
+            child.position.sub(pivot);
             this.animPivotGroup.add(child);
         }
         this.add(this.animPivotGroup);

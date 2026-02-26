@@ -152,6 +152,7 @@ export class InteractionManager {
                 this.selectBlock(block);
                 this.isDragging = true;
                 this.sceneMgr.controls.enabled = false;
+                this.gizmo.hide(); // hide gizmo during drag
 
                 // Determine drag plane
                 this.dragPlane = this.chooseDragPlane(block);
@@ -286,6 +287,7 @@ export class InteractionManager {
             if (this.selectedBlock) {
                 this.selectedBlock.snapToGrid();
                 this.selectedBlock.adjustToFloor();
+                this.gizmo.show(this.selectedBlock.getWorldCenter()); // show gizmo after drag
             }
         } else if (dist < 5) {
             // Click on empty space - deselect
@@ -349,10 +351,10 @@ export class InteractionManager {
         let axis: THREE.Vector3;
         switch (direction) {
             case 'up':
-                axis = right; // Rotate around the right axis to flip up
+                axis = right.negate(); // flip up: top tilts away
                 break;
             case 'down':
-                axis = right.negate(); // Rotate around -right to flip down
+                axis = right.clone(); // flip down: top tilts toward
                 break;
             case 'left':
                 axis = up.negate(); // Rotate around -up for left
