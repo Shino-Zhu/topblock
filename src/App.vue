@@ -4,12 +4,15 @@
         <div class="sidebar left-sidebar">
             <div class="sidebar-title">积木</div>
             <BlockThumbnail v-for="def in BLOCK_DEFINITIONS" :key="def.id" :blockDef="def"
-                :isSelected="selectedBlockId === def.id" @select="onThumbnailSelect" />
+                :isSelected="selectedBlockIds.includes(def.id)"
+                :isCenter="centerBlockId === def.id"
+                :isColliding="collidingBlockIds.includes(def.id)"
+                @select="onThumbnailSelect" />
         </div>
 
         <!-- Main Scene -->
         <div class="main-scene">
-            <GameScene ref="gameSceneRef" @select="onBlockSelect" @ready="onSceneReady" />
+            <GameScene ref="gameSceneRef" @select="onBlockSelect" @collision="onCollisionChange" @ready="onSceneReady" />
         </div>
 
         <!-- Right Sidebar: Controls -->
@@ -30,7 +33,9 @@ import type { SceneManager } from './game/SceneManager';
 import type { InteractionManager } from './game/InteractionManager';
 
 const gameSceneRef = ref<InstanceType<typeof GameScene>>();
-const selectedBlockId = ref<number | null>(null);
+const selectedBlockIds = ref<number[]>([]);
+const centerBlockId = ref<number | null>(null);
+const collidingBlockIds = ref<number[]>([]);
 
 let sceneMgr: SceneManager | null = null;
 let interactionMgr: InteractionManager | null = null;
@@ -40,12 +45,16 @@ function onSceneReady(mgr: { scene: SceneManager; interaction: InteractionManage
     interactionMgr = mgr.interaction;
 }
 
-function onBlockSelect(blockId: number | null) {
-    selectedBlockId.value = blockId;
+function onBlockSelect(data: { selectedIds: number[]; centerId: number | null }) {
+    selectedBlockIds.value = data.selectedIds;
+    centerBlockId.value = data.centerId;
+}
+
+function onCollisionChange(ids: number[]) {
+    collidingBlockIds.value = ids;
 }
 
 function onThumbnailSelect(id: number) {
-    selectedBlockId.value = id;
     interactionMgr?.selectBlockById(id);
 }
 

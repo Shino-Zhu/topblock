@@ -7,15 +7,29 @@ import { DragPlaneHelper } from './DragPlaneHelper';
 export class InteractionManager {
     private sceneMgr: SceneManager;
     private blocks: BlockObject[] = [];
-    private selectedBlock: BlockObject | null = null;
+
+    // Selection state: group + center
+    private selectedGroup: BlockObject[] = [];
+    private centerBlock: BlockObject | null = null;
+
+    // Raycasting
     private raycaster = new THREE.Raycaster();
     private mouse = new THREE.Vector2();
+
+    // Pointer state
+    private mouseDownPos = new THREE.Vector2();
+    private pendingBlock: BlockObject | null = null;
+    private hasMovedPastThreshold = false;
+    private readonly mouseMoveThreshold = 3;
+
+    // Drag state
     private isDragging = false;
+    private dragTarget: BlockObject | null = null;
     private dragPlane: THREE.Plane | null = null;
     private dragOffset = new THREE.Vector3();
-    private dragStartPos = new THREE.Vector3();
-    private mouseDownPos = new THREE.Vector2();
-    private onSelectChange: ((blockId: number | null) => void) | null = null;
+    private dragTargetStartPos = new THREE.Vector3();
+    private groupDragStartPositions = new Map<BlockObject, THREE.Vector3>();
+    private isGroupDrag = false;
 
     // Rotation gizmo
     private gizmo: RotationGizmo;
@@ -27,6 +41,11 @@ export class InteractionManager {
 
     // Drag plane helper
     private dragPlaneHelper: DragPlaneHelper;
+
+    // Callbacks
+    private onSelectChange: ((selectedIds: number[], centerId: number | null) => void) | null = null;
+    private onCollisionChange: ((collidingIds: number[]) => void) | null = null;
+    private lastCollidingIdsStr = '';
 
     constructor(sceneMgr: SceneManager) {
         this.sceneMgr = sceneMgr;
@@ -43,6 +62,7 @@ export class InteractionManager {
         canvas.addEventListener('pointerdown', this.onPointerDown);
         canvas.addEventListener('pointermove', this.onPointerMove);
         canvas.addEventListener('pointerup', this.onPointerUp);
+        canvas.addEventListener('dblclick', this.onDblClick);
         window.addEventListener('keydown', this.onKeyDown);
 
         // Register animation update
@@ -54,10 +74,12 @@ export class InteractionManager {
         for (const block of this.blocks) {
             block.updateAnimation();
         }
-        // Update gizmo position if selected block exists
-        if (this.selectedBlock && this.gizmo.visible && !this.isDragging && !this.isGizmoDragging) {
-            this.gizmo.position.copy(this.selectedBlock.getCenterCellWorldPos());
+        // Update gizmo position if center block exists
+        if (this.centerBlock && this.gizmo.visible && !this.isDragging && !this.isGizmoDragging) {
+            this.gizmo.position.copy(this.centerBlock.getCenterCellWorldPos());
         }
+        // Check collisions
+        this.checkCollisions();
     }
 
     addBlock(block: BlockObject) {
@@ -65,32 +87,129 @@ export class InteractionManager {
         this.sceneMgr.scene.add(block);
     }
 
-    setSelectCallback(cb: (blockId: number | null) => void) {
+    setSelectCallback(cb: (selectedIds: number[], centerId: number | null) => void) {
         this.onSelectChange = cb;
     }
 
-    selectBlock(block: BlockObject | null) {
-        if (this.selectedBlock) {
-            this.selectedBlock.setSelected(false);
+    setCollisionCallback(cb: (collidingIds: number[]) => void) {
+        this.onCollisionChange = cb;
+    }
+
+    // --- Selection ---
+
+    private selectGroupWithCenter(blocks: BlockObject[], center: BlockObject) {
+        // Deselect previous
+        for (const b of this.selectedGroup) {
+            b.setSelected(false);
         }
-        this.selectedBlock = block;
-        if (block) {
-            block.setSelected(true);
-            this.gizmo.show(block.getCenterCellWorldPos());
-        } else {
-            this.gizmo.hide();
+        this.selectedGroup = blocks;
+        this.centerBlock = center;
+
+        for (const b of blocks) {
+            b.setSelected(true);
         }
-        this.onSelectChange?.(block?.blockId ?? null);
+        this.gizmo.show(center.getCenterCellWorldPos());
+        this.notifySelectChange();
+    }
+
+    private deselectAll() {
+        for (const b of this.selectedGroup) {
+            b.setSelected(false);
+        }
+        this.selectedGroup = [];
+        this.centerBlock = null;
+        this.gizmo.hide();
+        this.notifySelectChange();
+    }
+
+    private notifySelectChange() {
+        const ids = this.selectedGroup.map(b => b.blockId);
+        const centerId = this.centerBlock?.blockId ?? null;
+        this.onSelectChange?.(ids, centerId);
     }
 
     selectBlockById(id: number) {
         const block = this.blocks.find(b => b.blockId === id);
         if (block) {
-            this.selectBlock(block);
+            const connected = this.findConnectedBlocks(block);
+            this.selectGroupWithCenter(connected, block);
         }
     }
 
-    private updateMouse(e: PointerEvent) {
+    // --- Adjacency & Connectivity ---
+
+    private areAdjacent(a: BlockObject, b: BlockObject): boolean {
+        const cellsA = a.getWorldCellPositions();
+        const cellsB = b.getWorldCellPositions();
+        for (const ca of cellsA) {
+            for (const cb of cellsB) {
+                const dx = Math.abs(ca.x - cb.x);
+                const dy = Math.abs(ca.y - cb.y);
+                const dz = Math.abs(ca.z - cb.z);
+                if (dx + dy + dz === 1) return true;
+            }
+        }
+        return false;
+    }
+
+    private findConnectedBlocks(block: BlockObject): BlockObject[] {
+        const visited = new Set<BlockObject>();
+        const queue: BlockObject[] = [block];
+        visited.add(block);
+
+        while (queue.length > 0) {
+            const current = queue.shift()!;
+            for (const other of this.blocks) {
+                if (visited.has(other)) continue;
+                if (this.areAdjacent(current, other)) {
+                    visited.add(other);
+                    queue.push(other);
+                }
+            }
+        }
+
+        return Array.from(visited);
+    }
+
+    // --- Collision Detection ---
+
+    private detectCollisions(): Set<number> {
+        const cellMap = new Map<string, number[]>();
+        for (const block of this.blocks) {
+            const cells = block.getWorldCellPositions();
+            for (const cell of cells) {
+                const key = `${cell.x},${cell.y},${cell.z}`;
+                if (!cellMap.has(key)) cellMap.set(key, []);
+                cellMap.get(key)!.push(block.blockId);
+            }
+        }
+
+        const colliding = new Set<number>();
+        for (const ids of cellMap.values()) {
+            if (ids.length > 1) {
+                for (const id of ids) colliding.add(id);
+            }
+        }
+        return colliding;
+    }
+
+    private checkCollisions() {
+        // Don't check during animations to avoid flicker
+        for (const block of this.blocks) {
+            if (block.animating) return;
+        }
+
+        const colliding = this.detectCollisions();
+        const str = Array.from(colliding).sort().join(',');
+        if (str !== this.lastCollidingIdsStr) {
+            this.lastCollidingIdsStr = str;
+            this.onCollisionChange?.(Array.from(colliding));
+        }
+    }
+
+    // --- Helpers ---
+
+    private updateMouse(e: { clientX: number; clientY: number }) {
         const rect = this.sceneMgr.renderer.domElement.getBoundingClientRect();
         this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
         this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
@@ -111,80 +230,6 @@ export class InteractionManager {
             obj = obj.parent;
         }
         return null;
-    }
-
-    private onPointerDown = (e: PointerEvent) => {
-        if (e.button !== 0) return;
-        this.updateMouse(e);
-        this.mouseDownPos.set(e.clientX, e.clientY);
-
-        this.raycaster.setFromCamera(this.mouse, this.sceneMgr.camera);
-
-        // Check gizmo rings first
-        if (this.gizmo.visible && this.selectedBlock) {
-            const gizmoIntersects = this.raycaster.intersectObjects(this.gizmo.getRingMeshes(), false);
-            if (gizmoIntersects.length > 0) {
-                const ringMesh = gizmoIntersects[0].object as THREE.Mesh;
-                const axis = this.gizmo.getAxisForRing(ringMesh);
-                if (axis) {
-                    this.isGizmoDragging = true;
-                    this.gizmoDragAxis = axis.clone();
-                    this.sceneMgr.controls.enabled = false;
-
-                    const center = this.gizmo.position.clone();
-                    this.gizmoDragPlane = new THREE.Plane(axis, -axis.dot(center));
-
-                    const intersectPoint = new THREE.Vector3();
-                    this.raycaster.ray.intersectPlane(this.gizmoDragPlane, intersectPoint);
-                    this.gizmoDragStartAngle = this.getAngleOnPlane(intersectPoint, center, axis);
-                    this.gizmoAccumulatedAngle = 0;
-                    return;
-                }
-            }
-        }
-
-        // Check block intersection
-        const intersects = this.raycaster.intersectObjects(this.getAllCellMeshes(), false);
-
-        if (intersects.length > 0) {
-            const block = this.findBlockByMesh(intersects[0].object);
-            if (block) {
-                this.selectBlock(block);
-                this.isDragging = true;
-                this.sceneMgr.controls.enabled = false;
-                this.gizmo.hide(); // hide gizmo during drag
-
-                // Determine drag plane
-                this.dragPlane = this.chooseDragPlane(block);
-                this.dragStartPos.copy(block.position);
-
-                // Show drag plane helper
-                const center = block.getWorldCenter();
-                this.dragPlaneHelper.show(center, this.dragPlane.normal.clone());
-
-                // Calculate offset
-                const planeIntersect = new THREE.Vector3();
-                this.raycaster.ray.intersectPlane(this.dragPlane, planeIntersect);
-                this.dragOffset.copy(block.position).sub(planeIntersect);
-            }
-        }
-    };
-
-    private getAngleOnPlane(point: THREE.Vector3, center: THREE.Vector3, axis: THREE.Vector3): number {
-        const dir = point.clone().sub(center);
-        dir.sub(axis.clone().multiplyScalar(dir.dot(axis)));
-        dir.normalize();
-
-        const ref = new THREE.Vector3();
-        if (Math.abs(axis.x) < 0.9) {
-            ref.set(1, 0, 0);
-        } else {
-            ref.set(0, 1, 0);
-        }
-        const u = ref.clone().sub(axis.clone().multiplyScalar(ref.dot(axis))).normalize();
-        const v = new THREE.Vector3().crossVectors(axis, u).normalize();
-
-        return Math.atan2(dir.dot(v), dir.dot(u));
     }
 
     private chooseDragPlane(block: BlockObject): THREE.Plane {
@@ -211,12 +256,161 @@ export class InteractionManager {
         return bestPlane;
     }
 
+    private getAngleOnPlane(point: THREE.Vector3, center: THREE.Vector3, axis: THREE.Vector3): number {
+        const dir = point.clone().sub(center);
+        dir.sub(axis.clone().multiplyScalar(dir.dot(axis)));
+        dir.normalize();
+
+        const ref = new THREE.Vector3();
+        if (Math.abs(axis.x) < 0.9) {
+            ref.set(1, 0, 0);
+        } else {
+            ref.set(0, 1, 0);
+        }
+        const u = ref.clone().sub(axis.clone().multiplyScalar(ref.dot(axis))).normalize();
+        const v = new THREE.Vector3().crossVectors(axis, u).normalize();
+
+        return Math.atan2(dir.dot(v), dir.dot(u));
+    }
+
+    // --- Drag ---
+
+    private startDrag(block: BlockObject) {
+        this.isDragging = true;
+        this.dragTarget = block;
+        this.gizmo.hide();
+
+        // Determine if group drag (block is in the current selection group)
+        this.isGroupDrag = this.selectedGroup.includes(block);
+
+        // Drag plane
+        this.dragPlane = this.chooseDragPlane(block);
+        this.dragTargetStartPos.copy(block.position);
+
+        // Store group start positions for group drag
+        this.groupDragStartPositions.clear();
+        if (this.isGroupDrag) {
+            for (const b of this.selectedGroup) {
+                this.groupDragStartPositions.set(b, b.position.clone());
+            }
+        }
+
+        // Show drag plane helper
+        const center = block.getWorldCenter();
+        this.dragPlaneHelper.show(center, this.dragPlane.normal.clone());
+
+        // Calculate offset
+        this.raycaster.setFromCamera(this.mouse, this.sceneMgr.camera);
+        const planeIntersect = new THREE.Vector3();
+        this.raycaster.ray.intersectPlane(this.dragPlane, planeIntersect);
+        this.dragOffset.copy(block.position).sub(planeIntersect);
+    }
+
+    // --- Group Rotation ---
+
+    private rotateGroup(axis: THREE.Vector3) {
+        if (!this.centerBlock) return;
+        // Don't rotate if any block is animating
+        for (const block of this.selectedGroup) {
+            if (block.animating) return;
+        }
+
+        const center = this.centerBlock;
+        const pivot = center.position.clone();
+        const normalizedAxis = axis.clone().normalize();
+        const quat = new THREE.Quaternion().setFromAxisAngle(normalizedAxis, Math.PI / 2);
+
+        // Compute target positions and check floor constraint
+        const targetPositions = new Map<BlockObject, THREE.Vector3>();
+        let minWorldY = Infinity;
+
+        for (const block of this.selectedGroup) {
+            let newPos: THREE.Vector3;
+            if (block === center) {
+                newPos = block.position.clone();
+            } else {
+                const relPos = block.position.clone().sub(pivot);
+                relPos.applyQuaternion(quat);
+                newPos = pivot.clone().add(new THREE.Vector3(
+                    Math.round(relPos.x),
+                    Math.round(relPos.y),
+                    Math.round(relPos.z)
+                ));
+            }
+            targetPositions.set(block, newPos);
+
+            // Check rotated cells for floor
+            for (const cell of block.cells) {
+                const v = new THREE.Vector3(cell[0], cell[1], cell[2]).applyQuaternion(quat);
+                const worldY = newPos.y + Math.round(v.y);
+                if (worldY < minWorldY) minWorldY = worldY;
+            }
+        }
+
+        // Floor adjustment
+        const yOffset = minWorldY < 0 ? -minWorldY : 0;
+
+        // Apply rotation and position animations
+        for (const block of this.selectedGroup) {
+            block.rotateBlock(axis);
+            const pos = targetPositions.get(block)!;
+            pos.y += yOffset;
+            if (!pos.equals(block.position)) {
+                block.animatePositionTo(pos, pivot, normalizedAxis);
+            }
+        }
+    }
+
+    // --- Pointer Events ---
+
+    private onPointerDown = (e: PointerEvent) => {
+        if (e.button !== 0) return;
+        this.updateMouse(e);
+        this.mouseDownPos.set(e.clientX, e.clientY);
+
+        this.raycaster.setFromCamera(this.mouse, this.sceneMgr.camera);
+
+        // Check gizmo rings first
+        if (this.gizmo.visible && this.centerBlock) {
+            const gizmoIntersects = this.raycaster.intersectObjects(this.gizmo.getRingMeshes(), false);
+            if (gizmoIntersects.length > 0) {
+                const ringMesh = gizmoIntersects[0].object as THREE.Mesh;
+                const axis = this.gizmo.getAxisForRing(ringMesh);
+                if (axis) {
+                    this.isGizmoDragging = true;
+                    this.gizmoDragAxis = axis.clone();
+                    this.sceneMgr.controls.enabled = false;
+
+                    const center = this.gizmo.position.clone();
+                    this.gizmoDragPlane = new THREE.Plane(axis, -axis.dot(center));
+
+                    const intersectPoint = new THREE.Vector3();
+                    this.raycaster.ray.intersectPlane(this.gizmoDragPlane, intersectPoint);
+                    this.gizmoDragStartAngle = this.getAngleOnPlane(intersectPoint, center, axis);
+                    this.gizmoAccumulatedAngle = 0;
+                    return;
+                }
+            }
+        }
+
+        // Check block intersection — DON'T select yet, just record pending
+        const intersects = this.raycaster.intersectObjects(this.getAllCellMeshes(), false);
+        if (intersects.length > 0) {
+            const block = this.findBlockByMesh(intersects[0].object);
+            if (block) {
+                this.pendingBlock = block;
+                this.hasMovedPastThreshold = false;
+                this.sceneMgr.controls.enabled = false;
+            }
+        }
+    };
+
     private onPointerMove = (e: PointerEvent) => {
         this.updateMouse(e);
         this.raycaster.setFromCamera(this.mouse, this.sceneMgr.camera);
 
         // Gizmo dragging
-        if (this.isGizmoDragging && this.gizmoDragAxis && this.gizmoDragPlane && this.selectedBlock) {
+        if (this.isGizmoDragging && this.gizmoDragAxis && this.gizmoDragPlane && this.centerBlock) {
             const intersectPoint = new THREE.Vector3();
             if (this.raycaster.ray.intersectPlane(this.gizmoDragPlane, intersectPoint)) {
                 const currentAngle = this.getAngleOnPlane(intersectPoint, this.gizmo.position, this.gizmoDragAxis);
@@ -230,24 +424,53 @@ export class InteractionManager {
                 if (Math.abs(this.gizmoAccumulatedAngle) >= Math.PI / 4) {
                     const sign = this.gizmoAccumulatedAngle > 0 ? 1 : -1;
                     const rotAxis = this.gizmoDragAxis.clone().multiplyScalar(sign);
-                    this.selectedBlock.rotateBlock(rotAxis);
+                    this.rotateGroup(rotAxis);
                     this.gizmoAccumulatedAngle = 0;
                 }
             }
             return;
         }
 
+        // Check if we need to start drag (threshold exceeded)
+        if (this.pendingBlock && !this.hasMovedPastThreshold && !this.isDragging) {
+            const dx = e.clientX - this.mouseDownPos.x;
+            const dy = e.clientY - this.mouseDownPos.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist >= this.mouseMoveThreshold) {
+                this.hasMovedPastThreshold = true;
+                this.startDrag(this.pendingBlock);
+            }
+        }
+
         // Block dragging
-        if (this.isDragging && this.selectedBlock && this.dragPlane) {
+        if (this.isDragging && this.dragTarget && this.dragPlane) {
             const intersectPoint = new THREE.Vector3();
             if (this.raycaster.ray.intersectPlane(this.dragPlane, intersectPoint)) {
                 const newPos = intersectPoint.add(this.dragOffset);
-                this.selectedBlock.position.x = Math.round(newPos.x);
-                this.selectedBlock.position.y = Math.max(0, Math.round(newPos.y));
-                this.selectedBlock.position.z = Math.round(newPos.z);
+                const snapped = new THREE.Vector3(
+                    Math.round(newPos.x),
+                    Math.max(0, Math.round(newPos.y)),
+                    Math.round(newPos.z)
+                );
+
+                if (this.isGroupDrag) {
+                    // Move whole group by integer delta
+                    const delta = snapped.clone().sub(this.dragTargetStartPos);
+                    for (const b of this.selectedGroup) {
+                        const startPos = this.groupDragStartPositions.get(b)!;
+                        b.position.set(
+                            startPos.x + delta.x,
+                            Math.max(0, startPos.y + delta.y),
+                            startPos.z + delta.z
+                        );
+                    }
+                } else {
+                    // Move only the drag target
+                    this.dragTarget.position.copy(snapped);
+                }
 
                 // Update drag plane helper position
-                this.dragPlaneHelper.position.copy(this.selectedBlock.getWorldCenter());
+                this.dragPlaneHelper.position.copy(this.dragTarget.getWorldCenter());
             }
             return;
         }
@@ -268,10 +491,7 @@ export class InteractionManager {
     private onPointerUp = (e: PointerEvent) => {
         if (e.button !== 0) return;
 
-        const dx = e.clientX - this.mouseDownPos.x;
-        const dy = e.clientY - this.mouseDownPos.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-
+        // Gizmo drag end
         if (this.isGizmoDragging) {
             this.isGizmoDragging = false;
             this.gizmoDragAxis = null;
@@ -280,33 +500,103 @@ export class InteractionManager {
             return;
         }
 
+        // Block drag end
         if (this.isDragging) {
             this.isDragging = false;
-            this.sceneMgr.controls.enabled = true;
             this.dragPlaneHelper.hide();
-            if (this.selectedBlock) {
-                this.selectedBlock.snapToGrid();
-                this.gizmo.show(this.selectedBlock.getCenterCellWorldPos()); // show gizmo after drag
-            }
-        } else if (dist < 5) {
-            // Click on empty space - deselect
-            this.updateMouse(e);
-            this.raycaster.setFromCamera(this.mouse, this.sceneMgr.camera);
 
-            // Don't deselect if clicking gizmo
-            if (this.gizmo.visible) {
-                const gizmoIntersects = this.raycaster.intersectObjects(this.gizmo.getRingMeshes(), false);
-                if (gizmoIntersects.length > 0) return;
+            if (this.isGroupDrag) {
+                for (const b of this.selectedGroup) {
+                    b.snapToGrid();
+                }
+            } else if (this.dragTarget) {
+                this.dragTarget.snapToGrid();
             }
 
-            const intersects = this.raycaster.intersectObjects(this.getAllCellMeshes(), false);
-            if (intersects.length === 0) {
-                this.selectBlock(null);
+            // Show gizmo at center block
+            if (this.centerBlock) {
+                this.gizmo.show(this.centerBlock.getCenterCellWorldPos());
+            }
+
+            this.sceneMgr.controls.enabled = true;
+            this.resetPointerState();
+            return;
+        }
+
+        // Click on block (no drag)
+        if (this.pendingBlock && !this.hasMovedPastThreshold) {
+            const block = this.pendingBlock;
+            const isCenter = block === this.centerBlock;
+
+            if (!isCenter) {
+                // Select block + all connected blocks, make it center
+                const connected = this.findConnectedBlocks(block);
+                this.selectGroupWithCenter(connected, block);
+            }
+            // If already center, do nothing
+        } else if (!this.pendingBlock) {
+            // Check for click on empty space
+            const dx = e.clientX - this.mouseDownPos.x;
+            const dy = e.clientY - this.mouseDownPos.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+
+            if (dist < this.mouseMoveThreshold) {
+                this.updateMouse(e);
+                this.raycaster.setFromCamera(this.mouse, this.sceneMgr.camera);
+
+                // Don't deselect if clicking gizmo
+                if (this.gizmo.visible) {
+                    const gi = this.raycaster.intersectObjects(this.gizmo.getRingMeshes(), false);
+                    if (gi.length > 0) {
+                        this.sceneMgr.controls.enabled = true;
+                        this.resetPointerState();
+                        return;
+                    }
+                }
+
+                const intersects = this.raycaster.intersectObjects(this.getAllCellMeshes(), false);
+                if (intersects.length === 0) {
+                    this.deselectAll();
+                }
             }
         }
 
-        this.dragPlane = null;
+        this.sceneMgr.controls.enabled = true;
+        this.resetPointerState();
     };
+
+    private onDblClick = (e: MouseEvent) => {
+        this.updateMouse(e);
+        this.raycaster.setFromCamera(this.mouse, this.sceneMgr.camera);
+
+        const intersects = this.raycaster.intersectObjects(this.getAllCellMeshes(), false);
+        if (intersects.length > 0) {
+            const block = this.findBlockByMesh(intersects[0].object);
+            if (block) {
+                // Double-click: select ONLY this block (not connected ones)
+                for (const b of this.selectedGroup) {
+                    b.setSelected(false);
+                }
+                this.selectedGroup = [block];
+                this.centerBlock = block;
+                block.setSelected(true);
+                this.gizmo.show(block.getCenterCellWorldPos());
+                this.notifySelectChange();
+            }
+        }
+    };
+
+    private resetPointerState() {
+        this.pendingBlock = null;
+        this.hasMovedPastThreshold = false;
+        this.isDragging = false;
+        this.isGroupDrag = false;
+        this.dragTarget = null;
+        this.dragPlane = null;
+        this.groupDragStartPositions.clear();
+    }
+
+    // --- Keyboard ---
 
     private onKeyDown = (e: KeyboardEvent) => {
         switch (e.key.toLowerCase()) {
@@ -336,8 +626,11 @@ export class InteractionManager {
     };
 
     flipBlock(direction: 'up' | 'down' | 'left' | 'right') {
-        if (!this.selectedBlock) return;
-        if (this.selectedBlock.animating) return; // don't stack animations
+        if (this.selectedGroup.length === 0 || !this.centerBlock) return;
+        // Don't stack animations
+        for (const block of this.selectedGroup) {
+            if (block.animating) return;
+        }
 
         const camDir = new THREE.Vector3();
         this.sceneMgr.camera.getWorldDirection(camDir);
@@ -382,7 +675,7 @@ export class InteractionManager {
             }
         }
 
-        this.selectedBlock.rotateBlock(bestAxis);
+        this.rotateGroup(bestAxis);
     }
 
     dispose() {
@@ -390,6 +683,7 @@ export class InteractionManager {
         canvas.removeEventListener('pointerdown', this.onPointerDown);
         canvas.removeEventListener('pointermove', this.onPointerMove);
         canvas.removeEventListener('pointerup', this.onPointerUp);
+        canvas.removeEventListener('dblclick', this.onDblClick);
         window.removeEventListener('keydown', this.onKeyDown);
         this.gizmo.dispose();
         this.dragPlaneHelper.dispose();

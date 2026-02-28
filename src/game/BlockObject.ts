@@ -20,6 +20,14 @@ export class BlockObject extends THREE.Group {
     private animPivotGroup: THREE.Group | null = null; // visual wrapper during animation
     private pendingCells: number[][] | null = null; // cells after rotation completes
 
+    // Position animation state (arc interpolation around pivot)
+    private posAnimating = false;
+    private posAnimStartPos: THREE.Vector3 | null = null;
+    private posAnimTargetPos: THREE.Vector3 | null = null;
+    private posAnimPivot: THREE.Vector3 | null = null;
+    private posAnimAxis: THREE.Vector3 | null = null;
+    private posAnimStartTime = 0;
+
     constructor(def: BlockDefinition) {
         super();
         this.blockId = def.id;
@@ -95,7 +103,32 @@ export class BlockObject extends THREE.Group {
      * Whether block is currently animating
      */
     get animating() {
-        return this.isAnimating;
+        return this.isAnimating || this.posAnimating;
+    }
+
+    /**
+     * Get world cell positions (integer grid)
+     */
+    getWorldCellPositions(): { x: number; y: number; z: number }[] {
+        return this.cells.map(cell => ({
+            x: Math.round(this.position.x + cell[0]),
+            y: Math.round(this.position.y + cell[1]),
+            z: Math.round(this.position.z + cell[2]),
+        }));
+    }
+
+    /**
+     * Animate position to target over ROTATION_DURATION ms.
+     * If pivot and axis are given, interpolate along an arc (constant radius).
+     * Otherwise, fall back to linear interpolation.
+     */
+    animatePositionTo(target: THREE.Vector3, pivot?: THREE.Vector3, axis?: THREE.Vector3) {
+        this.posAnimStartPos = this.position.clone();
+        this.posAnimTargetPos = target.clone();
+        this.posAnimPivot = pivot ? pivot.clone() : null;
+        this.posAnimAxis = axis ? axis.clone().normalize() : null;
+        this.posAnimStartTime = performance.now();
+        this.posAnimating = true;
     }
 
     /**
@@ -135,6 +168,34 @@ export class BlockObject extends THREE.Group {
      * Called each frame to update animation
      */
     updateAnimation() {
+        // Position animation
+        if (this.posAnimating && this.posAnimStartPos && this.posAnimTargetPos) {
+            const elapsed = performance.now() - this.posAnimStartTime;
+            const t = Math.min(elapsed / ROTATION_DURATION, 1);
+            const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+
+            if (this.posAnimPivot && this.posAnimAxis) {
+                // Arc interpolation: rotate start relative position around axis by ease * PI/2
+                const relStart = this.posAnimStartPos.clone().sub(this.posAnimPivot);
+                const angle = ease * (Math.PI / 2);
+                const q = new THREE.Quaternion().setFromAxisAngle(this.posAnimAxis, angle);
+                const relCurrent = relStart.clone().applyQuaternion(q);
+                this.position.copy(this.posAnimPivot).add(relCurrent);
+            } else {
+                // Linear fallback
+                this.position.lerpVectors(this.posAnimStartPos, this.posAnimTargetPos, ease);
+            }
+
+            if (t >= 1) {
+                this.position.copy(this.posAnimTargetPos);
+                this.posAnimating = false;
+                this.posAnimStartPos = null;
+                this.posAnimTargetPos = null;
+                this.posAnimPivot = null;
+                this.posAnimAxis = null;
+            }
+        }
+
         if (!this.isAnimating || !this.animPivotGroup) return;
 
         const elapsed = performance.now() - this.animStartTime;

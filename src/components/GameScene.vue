@@ -14,7 +14,8 @@ let sceneMgr: SceneManager | null = null;
 let interactionMgr: InteractionManager | null = null;
 
 const emit = defineEmits<{
-    (e: 'select', blockId: number | null): void;
+    (e: 'select', data: { selectedIds: number[]; centerId: number | null }): void;
+    (e: 'collision', collidingIds: number[]): void;
     (e: 'ready', mgr: { scene: SceneManager; interaction: InteractionManager }): void;
 }>();
 
@@ -42,8 +43,12 @@ onMounted(() => {
         interactionMgr!.addBlock(block);
     });
 
-    interactionMgr.setSelectCallback((blockId) => {
-        emit('select', blockId);
+    interactionMgr.setSelectCallback((selectedIds, centerId) => {
+        emit('select', { selectedIds, centerId });
+    });
+
+    interactionMgr.setCollisionCallback((collidingIds) => {
+        emit('collision', collidingIds);
     });
 
     emit('ready', { scene: sceneMgr, interaction: interactionMgr });

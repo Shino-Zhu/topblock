@@ -91,8 +91,8 @@ export class SceneManager {
     }
 
     private setupFloor() {
-        // Floor plane
-        const floorGeo = new THREE.PlaneGeometry(10, 10);
+        // Floor plane: -5.5 ~ 5.5
+        const floorGeo = new THREE.PlaneGeometry(11, 11);
         const floorMat = new THREE.MeshStandardMaterial({
             color: FLOOR_COLOR,
             roughness: 0.8,
@@ -104,8 +104,8 @@ export class SceneManager {
         floor.name = 'floor';
         this.scene.add(floor);
 
-        // Grid
-        const gridHelper = new THREE.GridHelper(10, 10, GRID_COLOR, GRID_COLOR);
+        // Grid: 11x11 with 11 divisions → lines at half-integer positions (-5.5, -4.5, ..., 4.5, 5.5)
+        const gridHelper = new THREE.GridHelper(11, 11, GRID_COLOR, GRID_COLOR);
         gridHelper.position.y = 0.01;
         this.scene.add(gridHelper);
     }
