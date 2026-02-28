@@ -109,7 +109,7 @@ body,
 }
 
 .right-sidebar {
-    width: 170px;
+    width: 190px;
     border-left: 1px solid #333;
     border-right: none;
 }

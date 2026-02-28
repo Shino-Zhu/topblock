@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { BlockDefinition } from './blocks';
 
 const EDGE_COLOR = 0x000000;
-const ROTATION_DURATION = 500; // ms
+const ROTATION_DURATION = 200; // ms
 
 export class BlockObject extends THREE.Group {
     blockId: number;
